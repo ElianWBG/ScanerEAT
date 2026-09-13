@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+db.sqlite3
+.env
+*.pt
+venv/
+.venv/
+staticfiles/
+media/
+*.preview.png
+evidencia_clips/
