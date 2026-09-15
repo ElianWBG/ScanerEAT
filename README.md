@@ -30,27 +30,23 @@ tablas nuevas, solo `Count`/`Avg`/`Max` sobre `EventoOcupacion` y `EventoEntrega
 ```
 restaurante_api/        Proyecto Django (settings, urls raíz)
 monitoreo/               App Django + DRF: modelo de datos, API REST, métricas
-vision_service/          Microservicio de visión (OpenCV + YOLOv8 + tracking)
-  ├── calibracion.py       Herramienta para marcar las zonas de mesa sobre un frame real
-  ├── geometry.py          Overlap geométrico bbox vs zona de mesa
-  ├── occupancy_engine.py  Máquina de estados: gracia + timeout de objeto abandonado
-  ├── staff_heuristic.py   Clasificación de personal por comportamiento
-  ├── table_fusion.py      Fusión de mesas adyacentes por exceso de personas
-  ├── clip_recorder.py     Grabación del clip de evidencia por ocupación (MP4)
-  ├── evidence_storage.py  Subida del clip a S3 (boto3)
-  ├── api_client.py        Cliente HTTP hacia la API Django
-  ├── detector.py / tracker.py   Wrappers de YOLOv8 y DeepSORT/SORT (import perezoso)
-  ├── pipeline.py          Orquestador end-to-end, punto de entrada CLI
-  └── config/mesas_zonas.json    Calibración de zonas + parámetros
-requirements.txt         Dependencias de ambos componentes
+requirements.txt         Dependencias de la API (Django + DRF + driver Postgres)
 .env.example              Variables de entorno (dev y AWS)
 ```
 
-Los dos componentes se comunican solo por HTTP/JSON: el microservicio de visión
-nunca toca la base de datos directamente, siempre reporta a través de la API REST
-(`vision_service/api_client.py`). Esto respeta la arquitectura de microservicios
-pedida y permite correr el microservicio de visión en una máquina distinta
-(ej. un mini-PC junto a las cámaras) apuntando a la API en EC2.
+El **microservicio de visión** (OpenCV + YOLOv8 + DeepSORT) vive en su **propio
+repositorio**, independiente de este. Los dos componentes se comunican solo por
+HTTP/JSON: el microservicio de visión nunca toca la base de datos directamente,
+siempre reporta a través de la API REST de este repo. Esto respeta la arquitectura
+de microservicios pedida y permite correr el microservicio de visión en una máquina
+distinta (ej. un mini-PC junto a las cámaras) apuntando a la API en EC2.
+
+Conexión entre repos en desarrollo:
+
+1. Este repo (API): `python manage.py runserver` (puerto 8000).
+2. Repo del microservicio: `.env` con `RESTAURANTE_API_URL=http://localhost:8000/api`.
+3. Correr el pipeline del microservicio sobre una grabación y ver los registros en
+   `GET /api/ocupaciones/` de esta API.
 
 ### Modelo de datos (`monitoreo/models.py`)
 
@@ -71,10 +67,15 @@ pedida y permite correr el microservicio de visión en una máquina distinta
 
 ### Decisiones de diseño clave
 
+> Los módulos mencionados (`occupancy_engine`, `geometry`, `staff_heuristic`,
+> `table_fusion`, `clip_recorder`, `evidence_storage`) viven en el **repo del
+> microservicio de visión**; se documentan aquí porque definen el comportamiento
+> que esta API registra.
+
 - **Ocupación por zona fija + overlap geométrico + período de gracia**
-  (`vision_service/occupancy_engine.py`, `geometry.py`): una mesa no se marca
+  (microservicio de visión, `occupancy_engine.py`, `geometry.py`): una mesa no se marca
   libre ni ocupada al primer frame — se exige presencia/ausencia sostenida por
-  un período de gracia configurable (`config/mesas_zonas.json`,
+  un período de gracia configurable (`mesas_zonas.json`,
   `periodo_gracia_segundos`, default 45s) para no confundir una ausencia
   temporal (baño, caja) con mesa libre, ni a alguien que solo pasa cerca con
   una mesa ocupada.
@@ -97,29 +98,28 @@ pedida y permite correr el microservicio de visión en una máquina distinta
     las mesas con platos sucios quedan "ocupadas" demasiado tiempo.
   - El evento de cierre lleva `motivo` (`ausencia_persona` u
     `objeto_abandonado`) para logs y depuración.
-- **Personal identificado por comportamiento** (`staff_heuristic.py`): un track
-  se clasifica como staff si visita varias mesas distintas en poco tiempo sin
-  quedarse sentado (dwell time bajo), no por apariencia ni nombre.
-- **Fusión de mesas por heurística** (`table_fusion.py`): mesas adyacentes
-  ocupadas a la vez + personas detectadas por encima de la suma de capacidades
-  se reportan como una fusión (`EventoOcupacion.fusionada_con`), para no
-  inflar las métricas de uso de cada mesa por separado.
+- **Personal identificado por comportamiento** (microservicio: `staff_heuristic.py`):
+  un track se clasifica como staff si visita varias mesas distintas en poco tiempo
+  sin quedarse sentado (dwell time bajo), no por apariencia ni nombre.
+- **Fusión de mesas por heurística** (microservicio: `table_fusion.py`): mesas
+  adyacentes ocupadas a la vez + personas detectadas por encima de la suma de
+  capacidades se reportan como una fusión (`EventoOcupacion.fusionada_con`), para
+  no inflar las métricas de uso de cada mesa por separado.
 - **Entregas como eventos múltiples** (`EventoEntrega`): modelo que acepta que
   no siempre hay aperitivo previo ni que todo el pedido llega junto.
-- **Evidencia en S3 por ocupación** (`clip_recorder.py`, `evidence_storage.py`):
-  ver sección más abajo.
+- **Evidencia en S3 por ocupación** (microservicio: `clip_recorder.py`,
+  `evidence_storage.py`): ver sección más abajo.
 
 ## Instalación
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # fish: source .venv/bin/activate.fish
 pip install -r requirements.txt
-cp .env.example .env    # se carga automáticamente (python-dotenv) en la API y en el pipeline
+cp .env.example .env    # se carga automáticamente (python-dotenv) en la API
 ```
 
-Para correr solo la API y los tests no hacen falta `ultralytics` ni
-`deep-sort-realtime` (imports perezosos); sí `opencv-python` para calibrar y
-grabar clips.
+Este repo solo contiene la API; las dependencias pesadas del microservicio de
+visión (`ultralytics`, `deep-sort-realtime`, `opencv-python`) van en su repo.
 
 ## Cómo correr la API (desarrollo)
 
@@ -134,8 +134,9 @@ Endpoints CRUD disponibles bajo `/api/`: `mesas/`, `personal/`, `ocupaciones/`,
 
 ## Calibración de zonas de mesa con video real
 
-`vision_service/config/mesas_zonas.json` trae coordenadas de **ejemplo**. La
-config real se genera marcando las mesas sobre un frame de la cámara del local:
+Ver el **repo del microservicio de visión** (`vision_service/calibracion.py`).
+Resumen: `mesas_zonas.json` trae coordenadas de **ejemplo**; la config real se
+genera marcando las mesas sobre un frame de la cámara del local:
 
 ```bash
 # desde una grabación (o una imagen png/jpg, o el índice de una cámara en vivo, ej. 0)
@@ -143,30 +144,6 @@ python -m vision_service.calibracion grabaciones/salon-2026-09-10.mp4 \
     --camara-id cam-1-salon-principal \
     --salida vision_service/config/mesas_zonas.json
 ```
-
-Controles en la ventana:
-
-| Tecla / acción       | Efecto                                                                 |
-|----------------------|------------------------------------------------------------------------|
-| click izquierdo      | agrega un vértice al polígono de la mesa en curso                       |
-| click derecho o `z`  | deshace el último vértice                                               |
-| `n` o Enter          | cierra el polígono; pide por terminal `mesa_id` y `capacidad`           |
-| `d`                  | elimina la última mesa cerrada                                          |
-| `f` / `b`            | avanza / retrocede 1 s en el video (para elegir un frame despejado)     |
-| `s`                  | guarda el JSON (y `<salida>.preview.png` con las zonas dibujadas) y sale |
-| `q` / Esc            | sale sin guardar                                                        |
-
-Opciones útiles:
-
-- `--frame N`: frame inicial del video.
-- `--base config.json`: parte de una config existente (sus mesas, `camara_id` y
-  `parametros`) para agregar/corregir mesas sin empezar de cero.
-- `--umbral-adyacencia 60`: distancia máxima en píxeles entre dos zonas para
-  marcarlas como `adyacentes` automáticamente (revisar a mano en el JSON si el
-  ángulo de la cámara engaña).
-- `--capacidad-default 4`: capacidad propuesta al cerrar cada mesa.
-- `--solo-ver`: no edita, solo dibuja la config actual sobre el frame para
-  verificar la calibración.
 
 Consideraciones:
 
@@ -176,13 +153,16 @@ Consideraciones:
   calibrar (podés pegar el mismo polígono en `Mesa.zona_poligono`).
 - Los polígonos están en píxeles del frame a la resolución con la que se
   calibró; si se cambia la resolución de la cámara hay que recalibrar.
-- Los `parametros` (gracia, timeout de objeto, umbrales de overlap) se heredan de
-  `--base` o toman los defaults del proyecto; se ajustan a mano en el JSON.
+- Los `parametros` (gracia, timeout de objeto, umbrales de overlap) se analizan
+  en la sección "Decisiones de diseño clave" de arriba y se ajustan en el JSON
+  del microservicio.
 
 ## Cómo correr el microservicio de visión
 
+El microservicio vive en su propio repo (ver "Arquitectura"). Resumen del uso:
+
 ```bash
-export RESTAURANTE_API_URL=http://localhost:8000/api   # o en .env
+export RESTAURANTE_API_URL=http://localhost:8000/api   # o en .env del microservicio
 python -m vision_service.pipeline ruta/a/grabacion.mp4
 # o con cámara en vivo:
 python -m vision_service.pipeline 0
@@ -190,10 +170,8 @@ python -m vision_service.pipeline 0
 ```
 
 `detector.py` (YOLOv8) y `tracker.py` (DeepSORT/SORT) importan sus dependencias
-pesadas de forma perezosa, así que el resto del paquete (`occupancy_engine.py`,
-`table_fusion.py`, `staff_heuristic.py`, `geometry.py`, `clip_recorder.py`,
-`evidence_storage.py`, `calibracion.py`) se puede testear sin GPU/torch
-instalados — ver `vision_service/tests/`.
+pesadas de forma perezosa, así que el resto del paquete se puede testear sin
+GPU/torch instalados — ver los tests en el repo del microservicio.
 
 ## Evidencia: clips a S3 por EventoOcupacion
 
@@ -202,7 +180,8 @@ ocupación y guarda la key en `EventoOcupacion.clip_s3_key` (vía
 `PATCH /api/ocupaciones/<id>/`). Se hace al cierre porque recién ahí el clip
 cubre la ocupación completa.
 
-Cómo funciona (`vision_service/clip_recorder.py`, `evidence_storage.py`):
+Cómo funciona (en el repo del microservicio: `clip_recorder.py`,
+`evidence_storage.py`):
 
 - Por cada mesa se mantiene un buffer circular (**pre-roll**) con los últimos
   frames sampleados, recortados a la zona de la mesa. Como la apertura se
@@ -245,16 +224,16 @@ un cambio local en `EventoOcupacion.clip_s3_url`.
 ```bash
 # API Django (8 tests: métricas + evidencia)
 python manage.py test monitoreo
-
-# Microservicio de visión (54 tests; los 3 de test_opencv_smoke.py se saltan si no hay OpenCV)
-python -m unittest discover -s vision_service/tests -t .
 ```
+
+> Los tests del microservicio de visión se corren en su repo
+> (`python -m unittest discover -s vision_service/tests -t .`).
 
 ## Despliegue en AWS (según stack definido)
 
-- **EC2**: corre la API Django (gunicorn) y, opcionalmente, el microservicio de
-  visión si el hardware alcanza para inferencia en tiempo real; si no, este
-  último corre en un equipo local junto a las cámaras y solo necesita salida a
+- **EC2**: corre la API Django (gunicorn). El **microservicio de visión** corre
+  en su propio repo y máquina (mini-PC junto a las cámaras, o una EC2 aparte si el
+  hardware alcanza para inferencia en tiempo real); solo necesita salida a
   internet para hablar con la API y con S3.
 - **RDS (Postgres)**: base de datos de producción — configurar `RDS_*` en `.env`
   (ver `.env.example`); si esas variables no están, `settings.py` usa sqlite
@@ -268,9 +247,9 @@ python -m unittest discover -s vision_service/tests -t .
 
 - Serializers/views de DRF y las 3 métricas: **hechos** (`monitoreo/`).
 - Microservicio de visión (zonas + gracia, staff por comportamiento, fusión de
-  mesas): **hecho** y testeado (`vision_service/`).
-- Calibración de zonas con video real: **hecha** (`vision_service/calibracion.py`);
-  falta correrla sobre las grabaciones del local y ajustar umbrales.
+  mesas): **hecho** y testeado — en su repo independiente.
+- Calibración de zonas con video real: **hecha** (`calibracion.py` en el repo del
+  microservicio); falta correrla sobre las grabaciones del local y ajustar umbrales.
 - Timeout de objetos abandonados sin persona: **hecho** (`occupancy_engine.py`,
   `timeout_objeto_abandonado_segundos`).
 - Clips de evidencia a S3 por `EventoOcupacion`: **hecho**
@@ -279,4 +258,3 @@ python -m unittest discover -s vision_service/tests -t .
   desde el pipeline (hoy la API y el cliente ya lo soportan:
   `ApiClient.reportar_entrega`, `ClasificadorStaff`), y validar los umbrales
   con video real.
-# Construccion

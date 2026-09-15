@@ -5,10 +5,5 @@ python-dotenv>=1.0
 psycopg2-binary>=2.9   # driver para RDS Postgres en producción
 gunicorn>=22.0          # servidor WSGI para EC2/producción
 
-# Microservicio de visión (vision_service)
-opencv-python>=4.10
-ultralytics>=8.2         # YOLOv8
-numpy>=1.26
-deep-sort-realtime>=1.3  # tracking (DeepSORT)
-requests>=2.32
-boto3>=1.34               # acceso a S3 (grabaciones/clips guardados como evidencia)
+# El microservicio de visión (YOLOv8 + DeepSORT + OpenCV + boto3) vive en su
+# propio repo con sus propias dependencias; se comunica con esta API por HTTP.
