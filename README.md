@@ -1,4 +1,4 @@
-# Sistema de monitoreo de mesas en restaurante con visión por computadoraa
+# Sistema de monitoreo de mesas en restaurante con visión por computadora
 
 Proyecto de curso (Construcción de Software, UNEMI) basado en el artículo indexado
 en Scopus *"Real-Time Table Availability Detection in Dynamic Dining Environments
